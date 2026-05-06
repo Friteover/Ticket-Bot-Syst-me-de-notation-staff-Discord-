@@ -57,7 +57,7 @@ class CommentModal(Modal, title="Laisser un commentaire"):
 
 
 # ══════════════════════════════════════════════
-#  VUE — Boutons commentaire ou non
+#  VUE — Boutons commentaire
 # ══════════════════════════════════════════════
 
 class AfterRatingView(View):
