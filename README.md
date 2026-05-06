@@ -126,16 +126,6 @@ Le bot doit avoir :
 
 ---
 
-## 💡 Améliorations possibles
-
-* Ajout d’une base de données (SQLite / MongoDB)
-* Statistiques des notes staff
-* Système de blacklist
-* Traduction multi-langue
-* Interface web
-
----
-
 ## 📄 Licence
 
 Libre d’utilisation et de modification.
