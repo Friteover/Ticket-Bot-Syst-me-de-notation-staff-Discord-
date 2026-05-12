@@ -1,6 +1,7 @@
 """
 ╔══════════════════════════════════════════════════════╗
 ║         TICKET BOT — Système de notation staff        ║
+║         (Notation via salon temporaire)               ║
 ╚══════════════════════════════════════════════════════╝
 
 INSTALLATION :
@@ -20,10 +21,22 @@ from datetime import datetime
 #  CONFIGURATION — À MODIFIER
 # ══════════════════════════════════════════════
 
-BOT_TOKEN         = "TON_TOKEN_ICI"
-STAFF_ROLE_ID     = 123456789012345678   # ID du rôle staff
-TICKET_CATEGORY   = "Tickets"            # Nom de la catégorie Discord des tickets
-LOG_CHANNEL_ID    = 123456789012345678   # ID du salon staff qui reçoit les notes
+BOT_TOKEN              = "TOKEN_ICI"
+STAFF_ROLE_ID          = 1426275412014796953   # ID du rôle staff
+TICKET_CATEGORY        = "Tickets"            # Nom de la catégorie Discord des tickets
+LOG_CHANNEL_ID         = 1426275558957777109   # ID du salon staff qui reçoit les notes
+RATING_CHANNEL_TIMEOUT = 120                  # Secondes avant suppression du salon de notation
+
+# ══════════════════════════════════════════════
+#  BOT
+# ══════════════════════════════════════════════
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
 
 # ══════════════════════════════════════════════
 #  MODAL — Commentaire après la note
@@ -38,12 +51,13 @@ class CommentModal(Modal, title="Laisser un commentaire"):
         required=True,
     )
 
-    def __init__(self, note: int, ticket_name: str, staff: discord.Member, owner: discord.Member):
+    def __init__(self, note: int, ticket_name: str, staff: discord.Member, owner: discord.Member, rating_channel: discord.TextChannel):
         super().__init__()
-        self.note        = note
-        self.ticket_name = ticket_name
-        self.staff       = staff
-        self.owner       = owner
+        self.note           = note
+        self.ticket_name    = ticket_name
+        self.staff          = staff
+        self.owner          = owner
+        self.rating_channel = rating_channel
 
     async def on_submit(self, interaction: discord.Interaction):
         await send_log(
@@ -54,6 +68,12 @@ class CommentModal(Modal, title="Laisser un commentaire"):
             staff=self.staff,
             owner=self.owner,
         )
+        # Supprime le salon de notation après l'envoi
+        await asyncio.sleep(5)
+        try:
+            await self.rating_channel.delete(reason="Avis soumis")
+        except discord.NotFound:
+            pass
 
 
 # ══════════════════════════════════════════════
@@ -61,21 +81,28 @@ class CommentModal(Modal, title="Laisser un commentaire"):
 # ══════════════════════════════════════════════
 
 class AfterRatingView(View):
-    def __init__(self, note: int, ticket_name: str, staff: discord.Member, owner: discord.Member):
-        super().__init__(timeout=120)
-        self.note        = note
-        self.ticket_name = ticket_name
-        self.staff       = staff
-        self.owner       = owner
+    def __init__(self, note: int, ticket_name: str, staff: discord.Member, owner: discord.Member, rating_channel: discord.TextChannel):
+        super().__init__(timeout=RATING_CHANNEL_TIMEOUT)
+        self.note           = note
+        self.ticket_name    = ticket_name
+        self.staff          = staff
+        self.owner          = owner
+        self.rating_channel = rating_channel
 
     @discord.ui.button(label="Ajouter un commentaire", style=discord.ButtonStyle.secondary, emoji="💬")
     async def with_comment(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.owner.id:
+            await interaction.response.send_message("❌ Ce salon de notation ne te concerne pas.", ephemeral=True)
+            return
         await interaction.response.send_modal(
-            CommentModal(self.note, self.ticket_name, self.staff, self.owner)
+            CommentModal(self.note, self.ticket_name, self.staff, self.owner, self.rating_channel)
         )
 
     @discord.ui.button(label="Envoyer sans commentaire", style=discord.ButtonStyle.success, emoji="✅")
     async def without_comment(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.owner.id:
+            await interaction.response.send_message("❌ Ce salon de notation ne te concerne pas.", ephemeral=True)
+            return
         await send_log(
             interaction=interaction,
             note=self.note,
@@ -84,6 +111,18 @@ class AfterRatingView(View):
             staff=self.staff,
             owner=self.owner,
         )
+        await asyncio.sleep(5)
+        try:
+            await self.rating_channel.delete(reason="Avis soumis sans commentaire")
+        except discord.NotFound:
+            pass
+
+    async def on_timeout(self):
+        """Supprime le salon si aucune réponse après le délai."""
+        try:
+            await self.rating_channel.delete(reason="Délai de notation dépassé")
+        except discord.NotFound:
+            pass
 
 
 # ══════════════════════════════════════════════
@@ -91,11 +130,12 @@ class AfterRatingView(View):
 # ══════════════════════════════════════════════
 
 class RatingView(View):
-    def __init__(self, ticket_name: str, staff: discord.Member, owner: discord.Member):
-        super().__init__(timeout=300)
-        self.ticket_name = ticket_name
-        self.staff       = staff
-        self.owner       = owner
+    def __init__(self, ticket_name: str, staff: discord.Member, owner: discord.Member, rating_channel: discord.TextChannel):
+        super().__init__(timeout=RATING_CHANNEL_TIMEOUT)
+        self.ticket_name    = ticket_name
+        self.staff          = staff
+        self.owner          = owner
+        self.rating_channel = rating_channel
 
         STARS = [
             ("😡  1 / 5", discord.ButtonStyle.danger,    1),
@@ -111,6 +151,13 @@ class RatingView(View):
 
     def _make_cb(self, note: int):
         async def callback(interaction: discord.Interaction):
+            # Vérifie que c'est bien le propriétaire du ticket
+            if interaction.user.id != self.owner.id:
+                await interaction.response.send_message(
+                    "❌ Ce salon de notation ne te concerne pas.", ephemeral=True
+                )
+                return
+
             for item in self.children:
                 item.disabled = True
 
@@ -124,20 +171,26 @@ class RatingView(View):
             )
             await interaction.response.edit_message(embed=embed, view=self)
 
-            after_view = AfterRatingView(note, self.ticket_name, self.staff, self.owner)
+            after_view = AfterRatingView(note, self.ticket_name, self.staff, self.owner, self.rating_channel)
             await interaction.followup.send(
                 embed=discord.Embed(
                     description="Souhaites-tu laisser un commentaire ?",
                     color=couleurs[note],
                 ),
                 view=after_view,
-                ephemeral=True,
             )
         return callback
 
+    async def on_timeout(self):
+        """Supprime le salon si aucune note après le délai."""
+        try:
+            await self.rating_channel.delete(reason="Délai de notation dépassé")
+        except discord.NotFound:
+            pass
+
 
 # ══════════════════════════════════════════════
-#  ENVOI DE LA NOTES DANS LE SALON STAFF
+#  ENVOI DE LA NOTE DANS LE SALON STAFF (LOG)
 # ══════════════════════════════════════════════
 
 async def send_log(
@@ -165,9 +218,9 @@ async def send_log(
         color=couleurs[note],
         timestamp=datetime.utcnow(),
     )
-    embed.add_field(name="👤  Utilisateur",  value=f"{owner.mention}\n`{owner.name}`",           inline=True)
-    embed.add_field(name="🛡️  Staff",        value=f"{staff.mention}\n`{staff.name}`" if staff else "Inconnu", inline=True)
-    embed.add_field(name="⭐  Note",         value=f"**{note} / 5**",                             inline=True)
+    embed.add_field(name="👤  Utilisateur",  value=f"{owner.mention}\n`{owner.name}`",                                  inline=True)
+    embed.add_field(name="🛡️  Staff",        value=f"{staff.mention}\n`{staff.name}`" if staff else "Inconnu",          inline=True)
+    embed.add_field(name="⭐  Note",         value=f"**{note} / 5**",                                                   inline=True)
     embed.add_field(
         name="💬  Commentaire",
         value=f"> {commentaire}" if commentaire else "*Aucun commentaire laissé.*",
@@ -184,23 +237,51 @@ async def send_log(
         await log_channel.send(embed=embed)
 
     confirm = discord.Embed(
-        description=f"✅ Merci pour ton retour ! Ta note **{note}/5** a bien été enregistrée.",
+        description=f"✅ Merci pour ton retour ! Ta note **{note}/5** a bien été enregistrée.\n\nCe salon sera supprimé dans 5 secondes.",
         color=couleurs[note],
     )
-    await interaction.response.send_message(embed=confirm, ephemeral=True)
+    await interaction.response.send_message(embed=confirm)
 
 
 # ══════════════════════════════════════════════
-#  MESSAGE DM DE NOTATION ENVOYÉ À L'USER
+#  CRÉATION DU SALON DE NOTATION
 # ══════════════════════════════════════════════
 
-async def send_rating_dm(
+async def create_rating_channel(
     owner: discord.Member,
     staff: discord.Member,
     ticket_name: str,
-    channel: discord.TextChannel,
+    guild: discord.Guild,
 ):
-    view = RatingView(ticket_name=ticket_name, staff=staff, owner=owner)
+    """
+    Crée un salon temporaire visible uniquement par l'owner pour qu'il note le staff.
+    Le salon est automatiquement supprimé après RATING_CHANNEL_TIMEOUT secondes
+    ou dès que l'avis est soumis.
+    """
+    # Permissions : visible UNIQUEMENT par l'owner (personne d'autre ne peut voir)
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        owner:              discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        guild.me:           discord.PermissionOverwrite(read_messages=True, send_messages=True),
+    }
+
+    # Nom du salon : avis-<pseudo>
+    channel_name = f"avis-{owner.name.lower().replace(' ', '-')}"
+
+    rating_channel = await guild.create_text_channel(
+        name=channel_name,
+        category=None,
+        overwrites=overwrites,
+        topic=f"Notation du ticket {ticket_name} — fermé par {staff.display_name}",
+    )
+
+    # Envoie le message de notation dans le nouveau salon
+    view = RatingView(
+        ticket_name=ticket_name,
+        staff=staff,
+        owner=owner,
+        rating_channel=rating_channel,
+    )
 
     embed = discord.Embed(
         title="🎫  Votre ticket a été fermé",
@@ -209,7 +290,8 @@ async def send_rating_dm(
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "**Tu as aimé le support reçu ?**\n"
             "Prends quelques secondes pour noter le staff 🙏\n\n"
-            "Clique sur une note ci-dessous ⬇️"
+            "Clique sur une note ci-dessous ⬇️\n\n"
+            f"⏳ *Ce salon sera automatiquement supprimé dans **{RATING_CHANNEL_TIMEOUT // 60} minutes** si aucune réponse.*"
         ),
         color=0x5865F2,
         timestamp=datetime.utcnow(),
@@ -217,19 +299,9 @@ async def send_rating_dm(
     embed.set_thumbnail(url=staff.display_avatar.url)
     embed.set_footer(text="Ta note aide à améliorer la qualité du support.")
 
-    try:
-        await owner.send(embed=embed, view=view)
-        return True
-    except discord.Forbidden:
-        fallback = discord.Embed(
-            title="⚠️  Tes DMs sont désactivés",
-            description=(
-                f"{owner.mention}, note le staff ici avant la fermeture du ticket :"
-            ),
-            color=0xFEE75C,
-        )
-        await channel.send(embed=fallback, view=view)
-        return False
+    await rating_channel.send(content=owner.mention, embed=embed, view=view)
+
+    return rating_channel
 
 
 # ══════════════════════════════════════════════
@@ -259,7 +331,7 @@ class TicketCloseView(View):
         channel    = interaction.channel
         staff_user = interaction.user
 
-        # Trouver l'owner du ticket
+        # Trouver l'owner du ticket (premier non-bot, non-staff à avoir écrit)
         ticket_owner = None
         async for msg in channel.history(oldest_first=True, limit=30):
             if not msg.author.bot:
@@ -275,8 +347,11 @@ class TicketCloseView(View):
             title="🔒  Ticket fermé",
             description=(
                 f"Ce ticket a été fermé par {staff_user.mention}.\n"
-                f"Un message de notation a été envoyé à {ticket_owner.mention if ticket_owner else 'l\'utilisateur'}.\n\n"
-                "**Le salon sera supprimé dans 10 secondes.**"
+                + (
+                    f"Un salon de notation a été créé pour {ticket_owner.mention}.\n"
+                    if ticket_owner else ""
+                )
+                + "\n**Le salon sera supprimé dans 10 secondes.**"
             ),
             color=0xED4245,
             timestamp=datetime.utcnow(),
@@ -284,12 +359,13 @@ class TicketCloseView(View):
         await interaction.response.edit_message(view=self)
         await channel.send(embed=closing_embed)
 
+        # Crée le salon de notation pour l'owner
         if ticket_owner:
-            await send_rating_dm(
+            await create_rating_channel(
                 owner=ticket_owner,
                 staff=staff_user,
                 ticket_name=channel.name,
-                channel=channel,
+                guild=interaction.guild,
             )
 
         await asyncio.sleep(10)
@@ -331,7 +407,7 @@ async def create_ticket(ctx: commands.Context):
             "Décrivez votre problème en détail ci-dessous.\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "Lorsque votre problème est résolu, le staff fermera le ticket\n"
-            "et vous recevrez un message pour noter notre support 🙏"
+            "et un salon sera créé pour noter notre support 🙏"
         ),
         color=0x5865F2,
         timestamp=datetime.utcnow(),
@@ -373,19 +449,21 @@ async def fermer_ticket(ctx: commands.Context):
         title="🔒  Ticket fermé",
         description=(
             f"Ticket fermé par {staff_user.mention}.\n"
-            "**Suppression dans 10 secondes.**"
+            + (f"Salon de notation créé pour {ticket_owner.mention}.\n" if ticket_owner else "")
+            + "**Suppression dans 10 secondes.**"
         ),
         color=0xED4245,
         timestamp=datetime.utcnow(),
     )
     await ctx.send(embed=closing_embed)
 
+    # Crée le salon de notation pour l'owner
     if ticket_owner:
-        await send_rating_dm(
+        await create_rating_channel(
             owner=ticket_owner,
             staff=staff_user,
             ticket_name=channel.name,
-            channel=channel,
+            guild=ctx.guild,
         )
 
     await asyncio.sleep(10)
